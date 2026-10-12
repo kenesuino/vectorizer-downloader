@@ -1,6 +1,7 @@
 const https = require('https');
 const http = require('http');
 const WebSocket = require('ws');
+const zlib = require('zlib');
 
 /**
  * Extract image dimensions from raw buffer (PNG, JPEG, GIF, WEBP)
@@ -565,6 +566,59 @@ function extractToken(input) {
   return null;
 }
 
+let cachedClientVersion = 11;
+let lastVersionFetchTime = 0;
+
+/**
+ * Dynamically discover latest ClientVersion required by Vectorizer.ai WebSocket
+ */
+async function getVectorizerClientVersion(forceRefresh = false) {
+  const now = Date.now();
+  if (!forceRefresh && cachedClientVersion && (now - lastVersionFetchTime < 1000 * 60 * 60)) {
+    return cachedClientVersion;
+  }
+
+  try {
+    const version = await new Promise((resolve) => {
+      const req = https.get('https://vectorizer.ai', { timeout: 6000 }, (res) => {
+        let html = '';
+        res.on('data', c => html += c);
+        res.on('end', () => {
+          const m = html.match(/src="(\/cf\/vai\/m\/Main\.min_[^"]+\.js)"/);
+          if (!m) return resolve(11);
+          const scriptUrl = 'https://vectorizer.ai' + m[1];
+          const sReq = https.get(scriptUrl, { headers: { 'Accept-Encoding': 'gzip, deflate' }, timeout: 6000 }, sRes => {
+            const chunks = [];
+            sRes.on('data', c => chunks.push(c));
+            sRes.on('end', () => {
+              try {
+                const buf = Buffer.concat(chunks);
+                let str;
+                try { str = zlib.gunzipSync(buf).toString('utf8'); }
+                catch { str = buf.toString('utf8'); }
+                const vm = str.match(/ClientVersion\s*=\s*(\d+)/);
+                if (vm) return resolve(parseInt(vm[1], 10));
+              } catch (e) {}
+              resolve(11);
+            });
+          });
+          sReq.on('error', () => resolve(11));
+        });
+      });
+      req.on('error', () => resolve(11));
+    });
+
+    if (version && version >= 11) {
+      cachedClientVersion = version;
+      lastVersionFetchTime = now;
+    }
+  } catch (err) {
+    console.warn('Failed to fetch latest Vectorizer.ai ClientVersion, using fallback:', cachedClientVersion);
+  }
+
+  return cachedClientVersion || 11;
+}
+
 /**
  * Main function: Given a URL or token, connect to Vectorizer.ai and return SVG
  */
@@ -621,13 +675,14 @@ async function extractVectorImage(inputUrlOrToken, optionsOrProgress = {}, maybe
 
   // 2. Connect to Vectorizer.ai WebSocket
   // Upstream page currently sends v: ClientVersion=11 and jobId incrementing from 1 (At.JobId starts 0, ++before send).
+  const clientVersion = await getVectorizerClientVersion();
   const params = new URLSearchParams({
     lc: 'en-US',
     len: '0',
     w: width.toString(),
     h: height.toString(),
     filename: filename,
-    v: '11',
+    v: clientVersion.toString(),
     token: token
   });
 
@@ -703,6 +758,9 @@ async function extractVectorImage(inputUrlOrToken, optionsOrProgress = {}, maybe
             clearTimeout(timeout);
             ws.close();
             const errReason = msg.body && msg.body.errorMessageTr ? msg.body.errorMessageTr : 'Unknown error from server';
+            if (typeof errReason === 'string' && errReason.toLowerCase().includes('stale webpage version')) {
+              lastVersionFetchTime = 0;
+            }
             reject(new Error(`Vectorizer server error: ${errReason}`));
           }
         } catch (e) {
