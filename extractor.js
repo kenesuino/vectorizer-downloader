@@ -620,13 +620,14 @@ async function extractVectorImage(inputUrlOrToken, optionsOrProgress = {}, maybe
   onProgress({ stage: 'connecting', percent: 15, message: `Connecting to stream (${width}x${height})...` });
 
   // 2. Connect to Vectorizer.ai WebSocket
+  // Upstream page currently sends v: ClientVersion=11 and jobId incrementing from 1 (At.JobId starts 0, ++before send).
   const params = new URLSearchParams({
     lc: 'en-US',
     len: '0',
     w: width.toString(),
     h: height.toString(),
     filename: filename,
-    v: '0',
+    v: '11',
     token: token
   });
 
